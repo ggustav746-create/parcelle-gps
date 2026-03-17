@@ -7,7 +7,7 @@ from difflib import get_close_matches
 
 st.set_page_config(page_title="Parcelle → GPS", layout="wide")
 
-st.title("📍 Parcelle → GPS (IGN Fixed Version)")
+st.title("📍 Parcelle → GPS (FINAL WORKING VERSION)")
 
 # -----------------------------
 # FILE READING
@@ -74,7 +74,7 @@ def get_insee(city, postal_code):
         return None, None
 
 # -----------------------------
-# GET PARCEL COORDINATES (NEW ENDPOINT)
+# FINAL WORKING PARCEL QUERY
 # -----------------------------
 def get_parcel_coords(code_insee, section, numero):
     url = "https://data.geopf.fr/wfs/ows"
@@ -82,7 +82,7 @@ def get_parcel_coords(code_insee, section, numero):
     numero_padded = numero.zfill(4)
 
     cql = (
-        f"code_insee='{code_insee}' "
+        f"commune='{code_insee}' "
         f"AND section='{section}' "
         f"AND numero='{numero_padded}'"
     )
@@ -91,7 +91,7 @@ def get_parcel_coords(code_insee, section, numero):
         "service": "WFS",
         "version": "2.0.0",
         "request": "GetFeature",
-        "typeName": "CADASTRALPARCELS.PARCELLAIRE_EXPRESS",
+        "typeName": "CADASTRALPARCELS.PARCELLAIRE_EXPRESS:parcelle",
         "outputFormat": "application/json",
         "CQL_FILTER": cql
     }
