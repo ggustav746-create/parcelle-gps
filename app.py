@@ -4,9 +4,9 @@ import requests
 import re
 from difflib import get_close_matches
 
-st.set_page_config(page_title="Parcelle → GPS (IGN FIX)", layout="wide")
+st.set_page_config(page_title="Parcelle → GPS (IGN FINAL)", layout="wide")
 
-st.title("📍 Parcelle → GPS (IGN OFFICIAL API)")
+st.title("📍 Parcelle → GPS (IGN FINAL WORKING VERSION)")
 
 # -----------------------------
 # FILE READING
@@ -37,7 +37,7 @@ def parse_parcelle(value):
     match = re.search(r"([A-Z]{1,2})(\d+)$", value)
     if match:
         section = match.group(1)
-        numero = str(int(match.group(2)))
+        numero = str(int(match.group(2)))  # remove leading zeros
         return section, numero
 
     return None, None
@@ -69,18 +69,26 @@ def correct_city(city, postal_code):
         return city
 
 # -----------------------------
-# IGN PARCEL SEARCH (WORKING)
+# IGN PARCEL SEARCH (FINAL FIX)
 # -----------------------------
 def get_coords(city, postal_code, parcelle):
 
-    query = f"{parcelle} {city}"
+    match = re.search(r"([A-Z]{1,2})(\d+)$", parcelle.upper())
+    if not match:
+        return None, None
+
+    section = match.group(1)
+    numero = str(int(match.group(2)))  # remove leading zeros
+
+    # 🔥 THIS IS THE KEY FIX
+    query = f"{section} {numero} {city}"
 
     url = "https://data.geopf.fr/geocodage/search"
 
     params = {
         "q": query,
         "limit": 1,
-        "index": "parcel"   # 🔥 critical
+        "index": "parcel"
     }
 
     try:
