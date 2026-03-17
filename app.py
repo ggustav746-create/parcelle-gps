@@ -37,118 +37,117 @@ def parse_parcelle(raw: str) -> dict | None:
     return None
 
 
+@st.cache_data(show_spinner=False)
+def get_insee_code(postal_code: str, city: str) -> str | None:
+    """
+    Resolve INSEE code from postal code + city name.
+    Uses fuzzy name matching to handle accents/case differences.
+    Cached to avoid repeated calls for the same commune.
+    """
+    try:
+        geo_url = "https://geo.api.gouv.fr/communes"
+        # Try with both postal code and name for precision
+        r = requests.get(geo_url, params={
+            "codePostal": postal_code,
+            "nom": city,
+            "fields": "code,nom",
+            "limit": 5,
+        }, timeout=8)
+        if r.status_code == 200 and r.json():
+            communes = r.json()
+            # Exact match first (case-insensitive)
+            city_upper = city.upper().strip()
+            for c in communes:
+                if c.get("nom", "").upper().strip() == city_upper:
+                    return c["code"]
+            # Otherwise return the first result
+            return communes[0]["code"]
+    except Exception:
+        pass
+
+    # Fallback: search by postal code only
+    try:
+        r = requests.get("https://geo.api.gouv.fr/communes", params={
+            "codePostal": postal_code,
+            "fields": "code,nom",
+            "limit": 1,
+        }, timeout=8)
+        if r.status_code == 200 and r.json():
+            return r.json()[0]["code"]
+    except Exception:
+        pass
+
+    return None
+
+
+def extract_centroid(geom: dict) -> tuple[float, float] | None:
+    """Extract (lat, lon) centroid from a GeoJSON geometry."""
+    gtype = geom.get("type")
+    coords = geom.get("coordinates", [])
+    if not coords:
+        return None
+    if gtype == "Polygon":
+        ring = coords[0]
+    elif gtype == "MultiPolygon":
+        ring = coords[0][0]
+    else:
+        return None
+    lon = sum(p[0] for p in ring) / len(ring)
+    lat = sum(p[1] for p in ring) / len(ring)
+    return round(lat, 6), round(lon, 6)
+
+
 def fetch_parcel_coords(postal_code: str, city: str, parcelle: str) -> dict:
     """
-    Query the IGN Géoportail WFS API for a cadastral parcel and return centroid lat/lon.
+    Query the IGN cadastre API using INSEE code (always more reliable than postal code).
     Falls back to commune geocoding if parcel not found.
     """
     parsed = parse_parcelle(parcelle)
     result = {
         "latitude": None,
         "longitude": None,
-        "status": "Non trouvée",
+        "status": "❌ Non trouvée",
         "source": "",
-        "adresse": "",
+        "insee": "",
     }
 
-    # ── Step 1: try IGN cadastre WFS ────────────────────────────────────────
-    if parsed:
-        section = parsed["section"]
-        numero = parsed["numero"]
-        # The IGN WFS uses INSEE code; derive it from postal_code + city name via geocoder
-        # We'll try the public cadastre API first (data.gouv.fr / API Carto)
-        api_url = "https://apicarto.ign.fr/api/cadastre/parcelle"
-        params = {
-            "code_postal": str(postal_code),
-            "nom_commune": city,
-            "section": section,
-            "numero": numero,
-            "_limit": 1,
-        }
-        try:
-            r = requests.get(api_url, params=params, timeout=10)
-            if r.status_code == 200:
-                data = r.json()
-                features = data.get("features", [])
-                if features:
-                    geom = features[0].get("geometry", {})
-                    coords = geom.get("coordinates", [])
-                    # centroid of polygon
-                    if geom.get("type") == "Polygon" and coords:
-                        ring = coords[0]
-                        lon = sum(p[0] for p in ring) / len(ring)
-                        lat = sum(p[1] for p in ring) / len(ring)
-                        props = features[0].get("properties", {})
-                        result.update({
-                            "latitude": round(lat, 6),
-                            "longitude": round(lon, 6),
-                            "status": "✅ Trouvée",
-                            "source": "IGN Cadastre",
-                            "adresse": props.get("numero", "") + " " + props.get("feuille", ""),
-                        })
-                        return result
-                    elif geom.get("type") == "MultiPolygon" and coords:
-                        ring = coords[0][0]
-                        lon = sum(p[0] for p in ring) / len(ring)
-                        lat = sum(p[1] for p in ring) / len(ring)
-                        result.update({
-                            "latitude": round(lat, 6),
-                            "longitude": round(lon, 6),
-                            "status": "✅ Trouvée",
-                            "source": "IGN Cadastre",
-                        })
-                        return result
-        except Exception as e:
-            pass  # fall through to next method
+    # ── Step 1: resolve INSEE code (mandatory for reliable cadastre queries) ─
+    insee = get_insee_code(postal_code, city)
+    result["insee"] = insee or ""
 
-    # ── Step 2: try API Carto with INSEE code lookup ─────────────────────────
-    if parsed:
+    # ── Step 2: query IGN cadastre with INSEE code ───────────────────────────
+    if parsed and insee:
         section = parsed["section"]
         numero = parsed["numero"]
-        # Get INSEE code via geo.api.gouv.fr
-        insee = None
         try:
-            geo_url = "https://geo.api.gouv.fr/communes"
-            geo_r = requests.get(geo_url, params={"codePostal": postal_code, "nom": city, "fields": "code", "limit": 1}, timeout=8)
-            if geo_r.status_code == 200 and geo_r.json():
-                insee = geo_r.json()[0].get("code")
+            r = requests.get(
+                "https://apicarto.ign.fr/api/cadastre/parcelle",
+                params={"code_insee": insee, "section": section, "numero": numero, "_limit": 1},
+                timeout=10,
+            )
+            if r.status_code == 200:
+                features = r.json().get("features", [])
+                if features:
+                    centroid = extract_centroid(features[0].get("geometry", {}))
+                    if centroid:
+                        lat, lon = centroid
+                        result.update({
+                            "latitude": lat,
+                            "longitude": lon,
+                            "status": "✅ Trouvée",
+                            "source": f"IGN Cadastre (INSEE {insee})",
+                        })
+                        return result
         except Exception:
             pass
 
-        if insee:
-            api_url = "https://apicarto.ign.fr/api/cadastre/parcelle"
-            params = {
-                "code_insee": insee,
-                "section": section,
-                "numero": numero,
-                "_limit": 1,
-            }
-            try:
-                r = requests.get(api_url, params=params, timeout=10)
-                if r.status_code == 200:
-                    features = r.json().get("features", [])
-                    if features:
-                        geom = features[0].get("geometry", {})
-                        coords = geom.get("coordinates", [])
-                        if geom.get("type") in ("Polygon", "MultiPolygon") and coords:
-                            ring = coords[0][0] if geom["type"] == "MultiPolygon" else coords[0]
-                            lon = sum(p[0] for p in ring) / len(ring)
-                            lat = sum(p[1] for p in ring) / len(ring)
-                            result.update({
-                                "latitude": round(lat, 6),
-                                "longitude": round(lon, 6),
-                                "status": "✅ Trouvée",
-                                "source": "IGN Cadastre (INSEE)",
-                                "adresse": insee,
-                            })
-                            return result
-            except Exception:
-                pass
-
     # ── Step 3: fallback — geocode the commune only ──────────────────────────
     try:
-        geo_url = "https://api-adresse.data.gouv.fr/search/"
-        r = requests.get(geo_url, params={"q": f"{city} {postal_code}", "limit": 1, "type": "municipality"}, timeout=8)
+        r = requests.get(
+            "https://api-adresse.data.gouv.fr/search/",
+            params={"q": f"{city} {postal_code}", "limit": 1, "type": "municipality"},
+            timeout=8,
+        )
         if r.status_code == 200:
             feats = r.json().get("features", [])
             if feats:
@@ -158,7 +157,6 @@ def fetch_parcel_coords(postal_code: str, city: str, parcelle: str) -> dict:
                     "longitude": round(lon, 6),
                     "status": "⚠️ Commune seulement",
                     "source": "Géocodage commune",
-                    "adresse": feats[0]["properties"].get("label", ""),
                 })
     except Exception:
         pass
@@ -172,7 +170,7 @@ def build_output_excel(df_result: pd.DataFrame) -> bytes:
     ws = wb_out.active
     ws.title = "Résultats GPS"
 
-    headers = ["Code Postal", "Commune", "Parcelle", "Latitude", "Longitude", "Statut", "Source", "Lien Google Maps"]
+    headers = ["Code Postal", "Commune", "Parcelle", "Code INSEE", "Latitude", "Longitude", "Statut", "Source", "Lien Google Maps"]
     header_fill = PatternFill("solid", start_color="1F4E79")
     header_font = Font(bold=True, color="FFFFFF", size=11)
     thin = Side(style="thin", color="CCCCCC")
@@ -196,6 +194,7 @@ def build_output_excel(df_result: pd.DataFrame) -> bytes:
             row.get("postal_code", ""),
             row.get("city", ""),
             row.get("parcelle", ""),
+            row.get("insee", ""),
             row.get("latitude", ""),
             row.get("longitude", ""),
             row.get("status", ""),
@@ -211,7 +210,7 @@ def build_output_excel(df_result: pd.DataFrame) -> bytes:
         lat = row.get("latitude")
         lon = row.get("longitude")
         if lat and lon:
-            link_cell = ws.cell(row=excel_row, column=8)
+            link_cell = ws.cell(row=excel_row, column=9)
             url = f"https://www.google.com/maps?q={lat},{lon}"
             link_cell.hyperlink = url
             link_cell.value = "📍 Voir sur Maps"
@@ -221,7 +220,7 @@ def build_output_excel(df_result: pd.DataFrame) -> bytes:
             link_cell.alignment = Alignment(horizontal="center")
 
     # Column widths
-    widths = [14, 22, 16, 12, 12, 26, 22, 18]
+    widths = [14, 22, 16, 14, 12, 12, 26, 22, 18]
     for i, w in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
 
@@ -310,7 +309,7 @@ if uploaded:
             col3.metric("❌ Non trouvées", not_found)
 
             st.subheader("📋 Résultats")
-            display_cols = ["postal_code", "city", "parcelle", "latitude", "longitude", "status", "source"]
+            display_cols = ["postal_code", "city", "parcelle", "insee", "latitude", "longitude", "status", "source"]
             st.dataframe(df_result[display_cols], use_container_width=True)
 
             # Map preview
