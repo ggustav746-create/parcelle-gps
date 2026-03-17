@@ -1,13 +1,12 @@
 import streamlit as st
 import pandas as pd
 import requests
-from shapely.geometry import shape
 import re
 from difflib import get_close_matches
 
 st.set_page_config(page_title="Parcelle → GPS", layout="wide")
 
-st.title("📍 Parcelle → GPS (FINAL WORKING VERSION)")
+st.title("📍 Parcelle → GPS (Stable Version)")
 
 # -----------------------------
 # FILE READING
@@ -37,67 +36,48 @@ def parse_parcelle(value):
 
     match = re.search(r"([A-Z]{1,2})(\d+)$", value)
     if match:
-        section = match.group(1)
-        numero = str(int(match.group(2)))
-        return section, numero
+        return match.group(1), str(int(match.group(2)))
 
     return None, None
 
 # -----------------------------
-# GET INSEE CODE (with autocorrect)
+# CITY CORRECTION
 # -----------------------------
 @st.cache_data
-def get_insee(city, postal_code):
+def correct_city(city, postal_code):
     url = "https://geo.api.gouv.fr/communes"
 
     try:
         r = requests.get(url, params={"codePostal": postal_code}, timeout=10)
         communes = r.json()
 
-        # Exact match
+        names = [c["nom"] for c in communes]
+
+        # Exact
         for c in communes:
             if c["nom"].lower() == city.lower():
-                return c["code"], c["nom"]
+                return c["nom"]
 
-        # Fuzzy match
-        names = [c["nom"] for c in communes]
+        # Fuzzy
         match = get_close_matches(city, names, n=1, cutoff=0.6)
-
         if match:
-            for c in communes:
-                if c["nom"] == match[0]:
-                    return c["code"], c["nom"]
+            return match[0]
 
-        return None, None
+        return city
 
     except:
-        return None, None
+        return city
 
 # -----------------------------
-# FINAL WORKING PARCEL QUERY
+# GEOCODING (ROBUST)
 # -----------------------------
-def get_parcel_coords(code_insee, section, numero):
-    url = "https://data.geopf.fr/wfs/ows"
+def get_coords(city, postal_code, parcelle):
+    query = f"{parcelle} {city} {postal_code}"
 
-    numero_padded = numero.zfill(4)
-
-    cql = (
-        f"commune='{code_insee}' "
-        f"AND section='{section}' "
-        f"AND numero='{numero_padded}'"
-    )
-
-    params = {
-        "service": "WFS",
-        "version": "2.0.0",
-        "request": "GetFeature",
-        "typeName": "CADASTRALPARCELS.PARCELLAIRE_EXPRESS:parcelle",
-        "outputFormat": "application/json",
-        "CQL_FILTER": cql
-    }
+    url = "https://api-adresse.data.gouv.fr/search/"
 
     try:
-        r = requests.get(url, params=params, timeout=10)
+        r = requests.get(url, params={"q": query, "limit": 1}, timeout=10)
 
         if r.status_code != 200:
             return None, None
@@ -107,10 +87,9 @@ def get_parcel_coords(code_insee, section, numero):
         if not data.get("features"):
             return None, None
 
-        geom = shape(data["features"][0]["geometry"])
-        centroid = geom.centroid
+        coords = data["features"][0]["geometry"]["coordinates"]
 
-        return centroid.y, centroid.x
+        return coords[1], coords[0]
 
     except:
         return None, None
@@ -139,39 +118,29 @@ if uploaded_file:
 
             for _, row in df.iterrows():
 
-                # INSEE
-                code_insee, city_corrected = get_insee(row["city"], row["postal_code"])
+                city_corr = correct_city(row["city"], row["postal_code"])
 
-                if not code_insee:
-                    lats.append(None)
-                    lons.append(None)
-                    status.append("❌ City not found")
-                    corrected_city.append(None)
-                    continue
-
-                # PARCEL
                 section, numero = parse_parcelle(row["parcelle"])
 
                 if not section:
                     lats.append(None)
                     lons.append(None)
                     status.append("❌ Invalid parcelle format")
-                    corrected_city.append(city_corrected)
+                    corrected_city.append(city_corr)
                     continue
 
-                # COORDS
-                lat, lon = get_parcel_coords(code_insee, section, numero)
+                lat, lon = get_coords(city_corr, row["postal_code"], row["parcelle"])
 
                 if lat is None:
                     lats.append(None)
                     lons.append(None)
-                    status.append("❌ Parcel not found")
+                    status.append("❌ Not found (approx search)")
                 else:
                     lats.append(lat)
                     lons.append(lon)
-                    status.append("✅ OK")
+                    status.append("✅ Approx OK")
 
-                corrected_city.append(city_corrected)
+                corrected_city.append(city_corr)
 
             df["latitude"] = lats
             df["longitude"] = lons
