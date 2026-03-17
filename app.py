@@ -4,9 +4,9 @@ import requests
 import re
 from difflib import get_close_matches
 
-st.set_page_config(page_title="Parcelle → GPS", layout="wide")
+st.set_page_config(page_title="Parcelle → GPS (IGN FIX)", layout="wide")
 
-st.title("📍 Parcelle → GPS (Stable Version)")
+st.title("📍 Parcelle → GPS (IGN OFFICIAL API)")
 
 # -----------------------------
 # FILE READING
@@ -36,7 +36,9 @@ def parse_parcelle(value):
 
     match = re.search(r"([A-Z]{1,2})(\d+)$", value)
     if match:
-        return match.group(1), str(int(match.group(2)))
+        section = match.group(1)
+        numero = str(int(match.group(2)))
+        return section, numero
 
     return None, None
 
@@ -51,15 +53,13 @@ def correct_city(city, postal_code):
         r = requests.get(url, params={"codePostal": postal_code}, timeout=10)
         communes = r.json()
 
-        names = [c["nom"] for c in communes]
-
-        # Exact
         for c in communes:
             if c["nom"].lower() == city.lower():
                 return c["nom"]
 
-        # Fuzzy
+        names = [c["nom"] for c in communes]
         match = get_close_matches(city, names, n=1, cutoff=0.6)
+
         if match:
             return match[0]
 
@@ -69,15 +69,22 @@ def correct_city(city, postal_code):
         return city
 
 # -----------------------------
-# GEOCODING (ROBUST)
+# IGN PARCEL SEARCH (WORKING)
 # -----------------------------
 def get_coords(city, postal_code, parcelle):
-    query = f"{parcelle} {city} {postal_code}"
 
-    url = "https://api-adresse.data.gouv.fr/search/"
+    query = f"{parcelle} {city}"
+
+    url = "https://data.geopf.fr/geocodage/search"
+
+    params = {
+        "q": query,
+        "limit": 1,
+        "index": "parcel"   # 🔥 critical
+    }
 
     try:
-        r = requests.get(url, params={"q": query, "limit": 1}, timeout=10)
+        r = requests.get(url, params=params, timeout=10)
 
         if r.status_code != 200:
             return None, None
@@ -134,11 +141,11 @@ if uploaded_file:
                 if lat is None:
                     lats.append(None)
                     lons.append(None)
-                    status.append("❌ Not found (approx search)")
+                    status.append("❌ Parcel not found")
                 else:
                     lats.append(lat)
                     lons.append(lon)
-                    status.append("✅ Approx OK")
+                    status.append("✅ Exact (IGN)")
 
                 corrected_city.append(city_corr)
 
